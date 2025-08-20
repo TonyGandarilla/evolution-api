@@ -9,6 +9,8 @@ export class EventDto {
     headers?: JsonValue;
     byEvents?: boolean;
     base64?: boolean;
+    batchMessages?: boolean;  // Add this
+    batchTimeoutMs?: number;  // Add this
   };
 
   websocket?: {
@@ -51,6 +53,8 @@ export function EventInstanceMixin<TBase extends Constructor>(Base: TBase) {
       url?: string;
       byEvents?: boolean;
       base64?: boolean;
+      batchMessages?: boolean;  // Add this
+      batchTimeoutMs?: number;  // Add this
     };
 
     websocket?: {

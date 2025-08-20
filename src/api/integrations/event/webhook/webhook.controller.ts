@@ -9,12 +9,17 @@ import axios, { AxiosInstance } from 'axios';
 import * as jwt from 'jsonwebtoken';
 
 import { EmitData, EventController, EventControllerInterface } from '../event.controller';
+import { WebhookBatchingService } from './webhook.batching';
 
 export class WebhookController extends EventController implements EventControllerInterface {
   private readonly logger = new Logger('WebhookController');
+  private batchingService: WebhookBatchingService;
 
   constructor(prismaRepository: PrismaRepository, waMonitor: WAMonitoringService) {
     super(prismaRepository, waMonitor, true, 'webhook');
+
+    // Initialize batching service with default 5 second timeout
+    this.batchingService = new WebhookBatchingService(5000);
   }
 
   override async set(instanceName: string, data: EventDto): Promise<wa.LocalWebHook> {
@@ -41,6 +46,9 @@ export class WebhookController extends EventController implements EventControlle
         headers: data.webhook?.headers,
         webhookBase64: data.webhook.base64,
         webhookByEvents: data.webhook.byEvents,
+        // Add the new fields
+        webhookBatchMessages: data.webhook.batchMessages,
+        webhookBatchTimeoutMs: data.webhook.batchTimeoutMs,
       },
       create: {
         enabled: data.webhook?.enabled,
@@ -50,10 +58,14 @@ export class WebhookController extends EventController implements EventControlle
         headers: data.webhook?.headers,
         webhookBase64: data.webhook.base64,
         webhookByEvents: data.webhook.byEvents,
+        // Add the new fields
+        webhookBatchMessages: data.webhook.batchMessages,
+        webhookBatchTimeoutMs: data.webhook.batchTimeoutMs,
       },
     });
   }
 
+  // Modify emit to handle batching
   public async emit({
     instanceName,
     origin,
@@ -70,8 +82,44 @@ export class WebhookController extends EventController implements EventControlle
       return;
     }
 
+    // Get instance webhook configuration
     const instance = (await this.get(instanceName)) as wa.LocalWebHook;
 
+    // Check if batching is enabled for this instance
+    const batchingEnabled = instance?.webhookBatchMessages || false;
+
+    // Configure batching timeout if specified
+    if (instance?.webhookBatchTimeoutMs && instance.webhookBatchTimeoutMs > 0) {
+      this.batchingService.setTimeoutMs(instance.webhookBatchTimeoutMs);
+    }
+
+    // Handle message batching if enabled and it's a message event
+    if (batchingEnabled && !data?._isBatched && this.batchingService.shouldBatchEvent(event)) {
+      const remoteJid = this.batchingService.getRemoteJid(data);
+
+      if (remoteJid) {
+        // Buffer the message
+        const buffered = this.batchingService.bufferMessage({
+          instanceName,
+          origin,
+          event,
+          data,
+          serverUrl,
+          dateTime,
+          sender,
+          apiKey,
+          local,
+          integration,
+        });
+
+        if (buffered) {
+          // Message was buffered, don't send immediately
+          return;
+        }
+      }
+    }
+
+    // Continue with original emit logic for non-batched messages
     const webhookConfig = configService.get<Webhook>('WEBHOOK');
     const webhookLocal = instance?.events;
     const webhookHeaders = { ...((instance?.headers as Record<string, string>) || {}) };
@@ -196,6 +244,18 @@ export class WebhookController extends EventController implements EventControlle
         }
       }
     }
+  }
+
+  // Add a method to flush all pending messages (useful for shutdown)
+  public flushPendingMessages(): void {
+    const batches = this.batchingService.flushAllBuffers();
+
+    // Process each batch
+    batches.forEach((batch) => {
+      this.emit(batch).catch((err) => {
+        this.logger.error(`Error sending batched messages: ${err.message}`);
+      });
+    });
   }
 
   private async retryWebhookRequest(

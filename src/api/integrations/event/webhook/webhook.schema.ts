@@ -34,6 +34,8 @@ export const webhookSchema: JSONSchema7 = {
         headers: { type: 'object' },
         byEvents: { type: 'boolean' },
         base64: { type: 'boolean' },
+        batchMessages: { type: 'boolean', default: false },
+        batchTimeoutMs: { type: 'number', default: 5000 },
         events: {
           type: 'array',
           minItems: 0,
